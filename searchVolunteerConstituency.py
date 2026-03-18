@@ -8,10 +8,10 @@ from openpyxl import load_workbook
 
 INPUT_FILE = Path("CAREkakis Volunteers Performance Matrix_R.xlsx")
 SEARCH_CONSTITUENCY = "Tampines West"
-OUTPUT_FILE = Path("tampines_west_events.xlsx")
+OUTPUT_FILE = Path("Tampines West_events_and_volunteers.xlsx")
 
 
-TARGET_COLUMNS = [
+EVENT_COLUMNS = [
     "Date",
     "Day",
     "Time",
@@ -25,6 +25,32 @@ TARGET_COLUMNS = [
     "GRL Attended",
     "Public Attended CA",
     "Total Attendance",
+    "Source Sheet",
+    "Original Header",
+]
+
+VOLUNTEER_COLUMNS = [
+    "Name",
+    "Email",
+    "Handphone",
+    "Constituency",
+    "Source Sheet",
+    "Recorded Event Count",
+    "Recorded Events",
+]
+
+APPEARANCE_COLUMNS = [
+    "Name",
+    "Email",
+    "Handphone",
+    "Constituency",
+    "Date",
+    "Day",
+    "Time",
+    "Venue",
+    "Program Stage",
+    "Program Name",
+    "Remarks",
     "Source Sheet",
     "Original Header",
 ]
@@ -47,14 +73,22 @@ def normalise_text(value):
     return str(value).strip()
 
 
+def canonicalise_header(text):
+    text = normalise_text(text).lower()
+    text = re.sub(r"[\n\r\t]+", " ", text)
+    text = re.sub(r"[^a-z0-9+ ]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def is_target_header_row(row_values):
-    row_norm = [normalise_text(v).lower() for v in row_values]
-    return "s/n" in row_norm and "name" in row_norm and "constituency" in row_norm
+    row_norm = [canonicalise_header(v) for v in row_values]
+    return "sn" in row_norm and "name" in row_norm and "constituency" in row_norm
 
 
 def find_header_row(ws, max_scan_rows=10):
     for r in range(1, min(ws.max_row, max_scan_rows) + 1):
-        values = [ws.cell(r, c).value for c in range(1, min(ws.max_column, 20) + 1)]
+        values = [ws.cell(r, c).value for c in range(1, min(ws.max_column, 25) + 1)]
         if is_target_header_row(values):
             return r
     return None
@@ -79,7 +113,6 @@ def header_looks_like_event(header_text):
 
     text = str(header_text).strip()
 
-    # Ignore summary / admin columns
     ignore_phrases = [
         "total cc",
         "total ck",
@@ -93,10 +126,14 @@ def header_looks_like_event(header_text):
         "certification",
         "t-shirt",
         "email",
+        "e-mail",
         "handphone",
+        "phone",
+        "mobile",
         "constituency",
         "name",
         "s/n",
+        "sn",
         "checklist",
         "javin update",
         "updated as of",
@@ -107,11 +144,10 @@ def header_looks_like_event(header_text):
     if any(phrase in lowered for phrase in ignore_phrases):
         return False
 
-    # Event headers usually contain a date-like pattern
     date_patterns = [
-        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b",   # 22 Feb 2025
-        r"\b\d{1,2}\s+[A-Za-z]{3,9}\b",           # 11 April
-        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s*:",         # 12 Feb:
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b",
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\b",
+        r"\b\d{1,2}\s+[A-Za-z]{3,9}\s*:",
         r"\bpre-?ns\b",
         r"\bpurple parade\b",
     ]
@@ -120,11 +156,6 @@ def header_looks_like_event(header_text):
 
 
 def parse_event_header(header_text, source_sheet):
-    """
-    Best-effort parser.
-    Because the workbook stores event info inside column headers, not all fields
-    are available. Missing fields are left blank.
-    """
     original = normalise_text(header_text).replace("\n", " ").strip()
     compact = re.sub(r"\s+", " ", original)
 
@@ -136,7 +167,6 @@ def parse_event_header(header_text, source_sheet):
     program_name = compact
     remarks = ""
 
-    # 1. Try to parse full date with year
     full_date_patterns = [
         r"(?P<date>\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})",
         r"(?P<date>\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2})",
@@ -155,7 +185,6 @@ def parse_event_header(header_text, source_sheet):
             if date_value:
                 break
 
-    # 2. If no year in header, infer from sheet name
     if date_value is None:
         inferred_year = None
         year_match = re.search(r"(20\d{2}|24|23)", source_sheet)
@@ -180,7 +209,6 @@ def parse_event_header(header_text, source_sheet):
     if date_value:
         day_value = date_value.strftime("%A")
 
-    # 3. Try to extract venue code from patterns like "12 Feb: KPG: Needs Assess"
     venue_match = re.search(
         r"^\s*\d{1,2}\s+[A-Za-z]{3,9}(?:\s+\d{4})?\s*:\s*([A-Za-z]{2,4})\s*:",
         compact,
@@ -190,7 +218,6 @@ def parse_event_header(header_text, source_sheet):
         venue_code = venue_match.group(1).upper()
         venue_value = VENUE_MAP.get(venue_code, venue_code)
 
-    # 4. Remove leading date part from program name
     program_name = re.sub(
         r"^\s*\d{1,2}\s+[A-Za-z]{3,9}(?:\s+\d{4})?\s*[:\-]?\s*",
         "",
@@ -198,10 +225,8 @@ def parse_event_header(header_text, source_sheet):
         flags=re.IGNORECASE,
     ).strip()
 
-    # If venue code appears at start, remove it from program name
     program_name = re.sub(r"^[A-Za-z]{2,4}\s*:\s*", "", program_name).strip()
 
-    # Special case
     if "pre-ns forum" in compact.lower():
         program_name = compact
 
@@ -224,9 +249,35 @@ def parse_event_header(header_text, source_sheet):
     }
 
 
-def extract_events_for_constituency(input_file, constituency):
+def find_column(headers, candidates):
+    """
+    headers: dict[col_index] = original header text
+    candidates: list of possible canonical header names
+    """
+    candidate_set = {canonicalise_header(x) for x in candidates}
+
+    for c, h in headers.items():
+        if canonicalise_header(h) in candidate_set:
+            return c
+
+    for c, h in headers.items():
+        canon = canonicalise_header(h)
+        for candidate in candidate_set:
+            if candidate in canon or canon in candidate:
+                return c
+
+    return None
+
+
+def extract_events_and_volunteers(input_file, constituency):
     wb = load_workbook(input_file, data_only=True)
-    results = []
+
+    event_summary_rows = []
+    volunteer_rows = []
+    appearance_rows = []
+
+    seen_volunteers = set()
+    seen_event_summary = set()
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -239,26 +290,18 @@ def extract_events_for_constituency(input_file, constituency):
             for c in range(1, ws.max_column + 1)
         }
 
-        # Find required columns by header text
-        constituency_col = None
-        for c, h in headers.items():
-            if h.lower() == "constituency":
-                constituency_col = c
-                break
+        constituency_col = find_column(headers, ["Constituency"])
+        name_col = find_column(headers, ["Name"])
+        email_col = find_column(headers, ["Email", "E-mail"])
+        handphone_col = find_column(headers, ["Handphone", "Phone", "Mobile"])
 
         if constituency_col is None:
             continue
 
-        # Build event column list
-        event_cols = [
-            c for c, h in headers.items()
-            if header_looks_like_event(h)
-        ]
-
+        event_cols = [c for c, h in headers.items() if header_looks_like_event(h)]
         if not event_cols:
             continue
 
-        # Find matching volunteer rows
         matching_rows = []
         for r in range(header_row + 1, ws.max_row + 1):
             cell_value = normalise_text(ws.cell(r, constituency_col).value)
@@ -268,44 +311,155 @@ def extract_events_for_constituency(input_file, constituency):
         if not matching_rows:
             continue
 
-        # Count attendance marks per event column
-        for c in event_cols:
-            header_text = headers[c]
-            attended_count = 0
+        event_attendance_counter = {c: 0 for c in event_cols}
 
-            for r in matching_rows:
+        for r in matching_rows:
+            volunteer_name = normalise_text(ws.cell(r, name_col).value) if name_col else ""
+            volunteer_email = normalise_text(ws.cell(r, email_col).value) if email_col else ""
+            volunteer_handphone = normalise_text(ws.cell(r, handphone_col).value) if handphone_col else ""
+            volunteer_constituency = normalise_text(ws.cell(r, constituency_col).value)
+
+            volunteer_event_list = []
+
+            for c in event_cols:
                 value = ws.cell(r, c).value
                 if is_attendance_mark(value):
-                    attended_count += 1
+                    event_attendance_counter[c] += 1
 
-            # Keep only events where at least one matching volunteer has a mark
+                    event_info = parse_event_header(headers[c], sheet_name)
+                    volunteer_event_list.append(event_info["Program Name"])
+
+                    appearance_rows.append({
+                        "Name": volunteer_name,
+                        "Email": volunteer_email,
+                        "Handphone": volunteer_handphone,
+                        "Constituency": volunteer_constituency,
+                        "Date": event_info["Date"],
+                        "Day": event_info["Day"],
+                        "Time": event_info["Time"],
+                        "Venue": event_info["Venue"],
+                        "Program Stage": event_info["Program Stage"],
+                        "Program Name": event_info["Program Name"],
+                        "Remarks": event_info["Remarks"],
+                        "Source Sheet": sheet_name,
+                        "Original Header": event_info["Original Header"],
+                    })
+
+            volunteer_key = (
+                volunteer_name.lower(),
+                volunteer_email.lower(),
+                volunteer_handphone.lower(),
+                volunteer_constituency.lower(),
+            )
+
+            if volunteer_key not in seen_volunteers:
+                seen_volunteers.add(volunteer_key)
+                volunteer_rows.append({
+                    "Name": volunteer_name,
+                    "Email": volunteer_email,
+                    "Handphone": volunteer_handphone,
+                    "Constituency": volunteer_constituency,
+                    "Source Sheet": sheet_name,
+                    "Recorded Event Count": len(volunteer_event_list),
+                    "Recorded Events": "; ".join(sorted(set(volunteer_event_list))),
+                })
+            else:
+                # Update existing volunteer if same person appears across sheets
+                for row in volunteer_rows:
+                    existing_key = (
+                        row["Name"].lower(),
+                        row["Email"].lower(),
+                        row["Handphone"].lower(),
+                        row["Constituency"].lower(),
+                    )
+                    if existing_key == volunteer_key:
+                        existing_events = set(
+                            x.strip() for x in row["Recorded Events"].split(";") if x.strip()
+                        )
+                        new_events = set(volunteer_event_list)
+                        merged = sorted(existing_events | new_events)
+                        row["Recorded Events"] = "; ".join(merged)
+                        row["Recorded Event Count"] = len(merged)
+                        break
+
+        for c in event_cols:
+            attended_count = event_attendance_counter[c]
             if attended_count > 0:
-                event_row = parse_event_header(header_text, sheet_name)
-                event_row["Registered"] = attended_count
-                event_row["Total Attendance"] = attended_count
-                results.append(event_row)
+                event_row = parse_event_header(headers[c], sheet_name)
+                event_key = (sheet_name, event_row["Original Header"])
 
-    return pd.DataFrame(results, columns=TARGET_COLUMNS)
+                if event_key not in seen_event_summary:
+                    seen_event_summary.add(event_key)
+                    event_row["Registered"] = attended_count
+                    event_row["Total Attendance"] = attended_count
+                    event_summary_rows.append(event_row)
+
+    events_df = pd.DataFrame(event_summary_rows, columns=EVENT_COLUMNS)
+    volunteers_df = pd.DataFrame(volunteer_rows, columns=VOLUNTEER_COLUMNS)
+    appearances_df = pd.DataFrame(appearance_rows, columns=APPEARANCE_COLUMNS)
+
+    return events_df, volunteers_df, appearances_df
 
 
 def main():
-    df = extract_events_for_constituency(INPUT_FILE, SEARCH_CONSTITUENCY)
+    events_df, volunteers_df, appearances_df = extract_events_and_volunteers(
+        INPUT_FILE,
+        SEARCH_CONSTITUENCY,
+    )
 
-    if df.empty:
-        print(f'No marked events found for constituency: "{SEARCH_CONSTITUENCY}"')
+    if events_df.empty and volunteers_df.empty:
+        print(f'No records found for constituency: "{SEARCH_CONSTITUENCY}"')
         print("This may mean either:")
-        print("1. there are no attendance marks for that constituency in this workbook, or")
-        print("2. the workbook is tracking volunteer home constituency, not event constituency.")
+        print("1. there are no matching volunteer rows for that constituency in this workbook, or")
+        print("2. the constituency label is different from what you searched.")
         return
 
-    # Sort by date where possible
-    df["_sort_date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.sort_values(by=["_sort_date", "Program Name"], na_position="last").drop(columns=["_sort_date"])
+    if not events_df.empty:
+        events_df["_sort_date"] = pd.to_datetime(events_df["Date"], errors="coerce")
+        events_df = events_df.sort_values(
+            by=["_sort_date", "Program Name"],
+            na_position="last"
+        ).drop(columns=["_sort_date"])
 
-    print(df.to_string(index=False))
+    if not volunteers_df.empty:
+        volunteers_df = volunteers_df.sort_values(
+            by=["Recorded Event Count", "Name"],
+            ascending=[False, True],
+            na_position="last"
+        )
+
+    if not appearances_df.empty:
+        appearances_df["_sort_date"] = pd.to_datetime(appearances_df["Date"], errors="coerce")
+        appearances_df = appearances_df.sort_values(
+            by=["Name", "_sort_date", "Program Name"],
+            na_position="last"
+        ).drop(columns=["_sort_date"])
+
+    print("\n=== EVENTS SUMMARY ===")
+    if events_df.empty:
+        print("No events found.")
+    else:
+        print(events_df.to_string(index=False))
+
+    print("\n=== VOLUNTEER BASE ===")
+    if volunteers_df.empty:
+        print("No volunteers found.")
+    else:
+        print(volunteers_df.to_string(index=False))
+
+    print("\n=== VOLUNTEER EVENT APPEARANCES ===")
+    if appearances_df.empty:
+        print("No volunteer appearances found.")
+    else:
+        print(appearances_df.to_string(index=False))
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Extracted Events")
+        if not events_df.empty:
+            events_df.to_excel(writer, index=False, sheet_name="Events Summary")
+        if not volunteers_df.empty:
+            volunteers_df.to_excel(writer, index=False, sheet_name="Volunteer Base")
+        if not appearances_df.empty:
+            appearances_df.to_excel(writer, index=False, sheet_name="Volunteer Event Appearances")
 
     print(f"\nSaved to: {OUTPUT_FILE.resolve()}")
 
